@@ -165,6 +165,71 @@ def test_team_session_state_in_completed_event():
     assert event_dict["session_state"] == {"status": "active", "progress": 75}
 
 
+def test_team_files_in_run_output():
+    """Test that TeamRunOutput includes files field."""
+    from agno.media import File
+    from agno.run.team import TeamRunOutput
+
+    test_files = [
+        File(name="test1.pdf", url="https://example.com/test1.pdf"),
+        File(name="test2.txt", url="https://example.com/test2.txt"),
+    ]
+
+    team_output = TeamRunOutput(run_id="team_123", team_id="team_456", files=test_files)
+
+    assert team_output.files is not None
+    assert len(team_output.files) == 2
+    assert team_output.files[0].name == "test1.pdf"
+    assert team_output.files[1].name == "test2.txt"
+
+    # Test serialization
+    team_dict = team_output.to_dict()
+    assert "files" in team_dict
+    assert len(team_dict["files"]) == 2
+    assert team_dict["files"][0]["name"] == "test1.pdf"
+    assert team_dict["files"][1]["name"] == "test2.txt"
+
+    # Test deserialization
+    reconstructed = TeamRunOutput.from_dict(team_dict)
+    assert reconstructed.files is not None
+    assert len(reconstructed.files) == 2
+    assert reconstructed.files[0].name == "test1.pdf"
+    assert reconstructed.files[1].name == "test2.txt"
+
+
+def test_team_files_in_completed_event():
+    """Test that TeamRunCompletedEvent includes files field."""
+    from agno.media import File
+    from agno.run.team import TeamRunOutput
+    from agno.utils.events import create_team_run_completed_event
+
+    test_files = [
+        File(name="report.pdf", url="https://example.com/report.pdf"),
+        File(name="data.csv", url="https://example.com/data.csv"),
+    ]
+
+    team_output = TeamRunOutput(
+        run_id="team_123", team_id="team_456", team_name="TestTeam", files=test_files
+    )
+
+    event = create_team_run_completed_event(from_run_response=team_output)
+
+    assert event.files is not None
+    assert len(event.files) == 2
+    assert event.files[0].name == "report.pdf"
+    assert event.files[0].url == "https://example.com/report.pdf"
+    assert event.files[1].name == "data.csv"
+    assert event.files[1].url == "https://example.com/data.csv"
+    assert event.run_id == "team_123"
+
+    # Test event serialization
+    event_dict = event.to_dict()
+    assert "files" in event_dict
+    assert len(event_dict["files"]) == 2
+    assert event_dict["files"][0]["name"] == "report.pdf"
+    assert event_dict["files"][1]["name"] == "data.csv"
+
+
 def test_session_state_mutability():
     """Test that session_state dict is passed by reference."""
     from agno.run.agent import RunOutput
