@@ -342,6 +342,17 @@ class MultiMCPTools(Toolkit):
             raise ValueError(f"Server index {server_idx} out of range")
 
         # Enter the context and create session
+        # IMPORTANT: We enter these context managers but intentionally don't store references
+        # to them or call __aexit__. This is because:
+        # 1. Parallel tool calls create sessions in different asyncio tasks
+        # 2. Python's async context managers MUST be exited in the same task where entered
+        # 3. Cleanup (via TTL or explicit call) may happen in a different task
+        # 4. Attempting cross-task __aexit__ causes: "Attempted to exit cancel scope in 
+        #    a different task than it was entered in"
+        #
+        # By not storing context references, they're garbage collected naturally, which
+        # handles cleanup without violating async context manager task-locality rules.
+        # This is the correct approach for per-run sessions in parallel execution.
         session_params = await context.__aenter__()  # type: ignore
         read, write = session_params[0:2]
 
@@ -351,12 +362,7 @@ class MultiMCPTools(Toolkit):
         # Initialize the session
         await session.initialize()
 
-        # Store the session with timestamp
-        # Note: We don't store context managers to avoid cross-task cleanup issues.
-        # The context managers will be cleaned up by garbage collection. While this
-        # results in less predictable cleanup timing compared to explicit cleanup,
-        # this trade-off is necessary to avoid RuntimeError when cleanup happens in
-        # a different task than where the context was entered.
+        # Store only the session with timestamp (not context managers)
         self._run_sessions[cache_key] = (session, time.time())
 
         return session
