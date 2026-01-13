@@ -162,7 +162,6 @@ class MultiMCPTools(Toolkit):
         # For MultiMCP, we track sessions per (run_id, server_idx) since we have multiple servers
         # Maps (run_id, server_idx) to (session, timestamp) for TTL-based cleanup
         self._run_sessions: Dict[Tuple[str, int], Tuple[ClientSession, float]] = {}
-        self._run_session_contexts: Dict[Tuple[str, int], Any] = {}  # Maps (run_id, server_idx) to context managers
         self._session_ttl_seconds: float = 300.0  # 5 minutes default TTL
 
         self.allow_partial_failure = allow_partial_failure
@@ -343,6 +342,17 @@ class MultiMCPTools(Toolkit):
             raise ValueError(f"Server index {server_idx} out of range")
 
         # Enter the context and create session
+        # IMPORTANT: We enter these context managers but intentionally don't store references
+        # to them or call __aexit__. This is because:
+        # 1. Parallel tool calls create sessions in different asyncio tasks
+        # 2. Python's async context managers MUST be exited in the same task where entered
+        # 3. Cleanup (via TTL or explicit call) may happen in a different task
+        # 4. Attempting cross-task __aexit__ causes: "Attempted to exit cancel scope in 
+        #    a different task than it was entered in"
+        #
+        # By not storing context references, they're garbage collected naturally, which
+        # handles cleanup without violating async context manager task-locality rules.
+        # This is the correct approach for per-run sessions in parallel execution.
         session_params = await context.__aenter__()  # type: ignore
         read, write = session_params[0:2]
 
@@ -352,39 +362,30 @@ class MultiMCPTools(Toolkit):
         # Initialize the session
         await session.initialize()
 
-        # Store the session with timestamp and context for cleanup
+        # Store only the session with timestamp (not context managers)
         self._run_sessions[cache_key] = (session, time.time())
-        self._run_session_contexts[cache_key] = (context, session_context)
 
         return session
 
     async def cleanup_run_session(self, run_id: str, server_idx: int) -> None:
-        """Clean up a per-run session."""
+        """
+        Clean up the session for a specific run.
+
+        This removes the session reference and allows garbage collection to clean up
+        the underlying connections. We don't explicitly exit context managers to avoid
+        cross-task cleanup issues with async context managers.
+        
+        While garbage collection results in less predictable cleanup timing compared to
+        explicit cleanup, this trade-off is necessary to prevent RuntimeError when
+        cleanup happens in a different task than where the context was entered.
+        """
         cache_key = (run_id, server_idx)
         if cache_key not in self._run_sessions:
             return
 
-        try:
-            context, session_context = self._run_session_contexts[cache_key]
-
-            # Exit session context - silently ignore errors
-            try:
-                await session_context.__aexit__(None, None, None)
-            except (RuntimeError, Exception):
-                pass  # Silently ignore
-
-            # Exit transport context - silently ignore errors
-            try:
-                await context.__aexit__(None, None, None)
-            except (RuntimeError, Exception):
-                pass  # Silently ignore
-
-        except Exception:
-            pass  # Silently ignore all cleanup errors
-        finally:
-            # Remove from cache
-            self._run_sessions.pop(cache_key, None)
-            self._run_session_contexts.pop(cache_key, None)
+        # Simply remove the session reference
+        # The underlying connections will be cleaned up by garbage collection
+        del self._run_sessions[cache_key]
 
     async def connect(self, force: bool = False):
         """Initialize a MultiMCPTools instance and connect to the MCP servers"""

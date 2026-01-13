@@ -164,7 +164,6 @@ class MCPTools(Toolkit):
         # Session management for per-agent-run sessions with dynamic headers
         # Maps run_id to (session, timestamp) for TTL-based cleanup
         self._run_sessions: dict[str, Tuple[ClientSession, float]] = {}
-        self._run_session_contexts: dict[str, Any] = {}  # Maps run_id to session context managers
         self._session_ttl_seconds: float = 300.0  # 5 minutes TTL for MCP sessions
 
         def cleanup():
@@ -354,6 +353,17 @@ class MCPTools(Toolkit):
             return self.session
 
         # Enter the context and create session
+        # IMPORTANT: We enter these context managers but intentionally don't store references
+        # to them or call __aexit__. This is because:
+        # 1. Parallel tool calls create sessions in different asyncio tasks
+        # 2. Python's async context managers MUST be exited in the same task where entered
+        # 3. Cleanup (via TTL or explicit call) may happen in a different task
+        # 4. Attempting cross-task __aexit__ causes: "Attempted to exit cancel scope in 
+        #    a different task than it was entered in"
+        #
+        # By not storing context references, they're garbage collected naturally, which
+        # handles cleanup without violating async context manager task-locality rules.
+        # This is the correct approach for per-run sessions in parallel execution.
         session_params = await context.__aenter__()  # type: ignore
         read, write = session_params[0:2]
 
@@ -363,9 +373,8 @@ class MCPTools(Toolkit):
         # Initialize the session
         await session.initialize()
 
-        # Store the session with timestamp and context for cleanup
+        # Store only the session with timestamp (not context managers)
         self._run_sessions[run_id] = (session, time.time())
-        self._run_session_contexts[run_id] = (context, session_context)
 
         return session
 
@@ -373,39 +382,20 @@ class MCPTools(Toolkit):
         """
         Clean up the session for a specific run.
 
-        Note: Cleanup may fail due to async context manager limitations when
-        contexts are entered/exited across different tasks. Errors are logged
-        but not raised.
+        This removes the session reference and allows garbage collection to clean up
+        the underlying connections. We don't explicitly exit context managers to avoid
+        cross-task cleanup issues with async context managers.
+        
+        While garbage collection results in less predictable cleanup timing compared to
+        explicit cleanup, this trade-off is necessary to prevent RuntimeError when
+        cleanup happens in a different task than where the context was entered.
         """
         if run_id not in self._run_sessions:
             return
 
-        try:
-            # Get the context managers
-            context, session_context = self._run_session_contexts.get(run_id, (None, None))
-
-            # Try to clean up session context
-            # Silently ignore cleanup errors - these are harmless
-            if session_context is not None:
-                try:
-                    await session_context.__aexit__(None, None, None)
-                except (RuntimeError, Exception):
-                    pass  # Silently ignore
-
-            # Try to clean up transport context
-            if context is not None:
-                try:
-                    await context.__aexit__(None, None, None)
-                except (RuntimeError, Exception):
-                    pass  # Silently ignore
-
-            # Remove from tracking regardless of cleanup success
-            # The connections will be cleaned up by garbage collection
-            del self._run_sessions[run_id]
-            del self._run_session_contexts[run_id]
-
-        except Exception:
-            pass  # Silently ignore all cleanup errors
+        # Simply remove the session reference
+        # The underlying connections will be cleaned up by garbage collection
+        del self._run_sessions[run_id]
 
     async def is_alive(self) -> bool:
         if self.session is None:
