@@ -164,7 +164,6 @@ class MCPTools(Toolkit):
         # Session management for per-agent-run sessions with dynamic headers
         # Maps run_id to (session, timestamp) for TTL-based cleanup
         self._run_sessions: dict[str, Tuple[ClientSession, float]] = {}
-        self._run_session_contexts: dict[str, Any] = {}  # Maps run_id to session context managers
         self._session_ttl_seconds: float = 300.0  # 5 minutes TTL for MCP sessions
 
         def cleanup():
@@ -363,9 +362,10 @@ class MCPTools(Toolkit):
         # Initialize the session
         await session.initialize()
 
-        # Store the session with timestamp and context for cleanup
+        # Store the session with timestamp
+        # Note: We don't store context managers to avoid cross-task cleanup issues
+        # The context managers will be cleaned up by garbage collection
         self._run_sessions[run_id] = (session, time.time())
-        self._run_session_contexts[run_id] = (context, session_context)
 
         return session
 
@@ -373,39 +373,16 @@ class MCPTools(Toolkit):
         """
         Clean up the session for a specific run.
 
-        Note: Cleanup may fail due to async context manager limitations when
-        contexts are entered/exited across different tasks. Errors are logged
-        but not raised.
+        This removes the session reference and allows garbage collection to clean up
+        the underlying connections. We don't explicitly exit context managers to avoid
+        cross-task cleanup issues with async context managers.
         """
         if run_id not in self._run_sessions:
             return
 
-        try:
-            # Get the context managers
-            context, session_context = self._run_session_contexts.get(run_id, (None, None))
-
-            # Try to clean up session context
-            # Silently ignore cleanup errors - these are harmless
-            if session_context is not None:
-                try:
-                    await session_context.__aexit__(None, None, None)
-                except (RuntimeError, Exception):
-                    pass  # Silently ignore
-
-            # Try to clean up transport context
-            if context is not None:
-                try:
-                    await context.__aexit__(None, None, None)
-                except (RuntimeError, Exception):
-                    pass  # Silently ignore
-
-            # Remove from tracking regardless of cleanup success
-            # The connections will be cleaned up by garbage collection
-            del self._run_sessions[run_id]
-            del self._run_session_contexts[run_id]
-
-        except Exception:
-            pass  # Silently ignore all cleanup errors
+        # Simply remove the session reference
+        # The underlying connections will be cleaned up by garbage collection
+        del self._run_sessions[run_id]
 
     async def is_alive(self) -> bool:
         if self.session is None:

@@ -162,7 +162,6 @@ class MultiMCPTools(Toolkit):
         # For MultiMCP, we track sessions per (run_id, server_idx) since we have multiple servers
         # Maps (run_id, server_idx) to (session, timestamp) for TTL-based cleanup
         self._run_sessions: Dict[Tuple[str, int], Tuple[ClientSession, float]] = {}
-        self._run_session_contexts: Dict[Tuple[str, int], Any] = {}  # Maps (run_id, server_idx) to context managers
         self._session_ttl_seconds: float = 300.0  # 5 minutes default TTL
 
         self.allow_partial_failure = allow_partial_failure
@@ -352,39 +351,28 @@ class MultiMCPTools(Toolkit):
         # Initialize the session
         await session.initialize()
 
-        # Store the session with timestamp and context for cleanup
+        # Store the session with timestamp
+        # Note: We don't store context managers to avoid cross-task cleanup issues
+        # The context managers will be cleaned up by garbage collection
         self._run_sessions[cache_key] = (session, time.time())
-        self._run_session_contexts[cache_key] = (context, session_context)
 
         return session
 
     async def cleanup_run_session(self, run_id: str, server_idx: int) -> None:
-        """Clean up a per-run session."""
+        """
+        Clean up the session for a specific run.
+
+        This removes the session reference and allows garbage collection to clean up
+        the underlying connections. We don't explicitly exit context managers to avoid
+        cross-task cleanup issues with async context managers.
+        """
         cache_key = (run_id, server_idx)
         if cache_key not in self._run_sessions:
             return
 
-        try:
-            context, session_context = self._run_session_contexts[cache_key]
-
-            # Exit session context - silently ignore errors
-            try:
-                await session_context.__aexit__(None, None, None)
-            except (RuntimeError, Exception):
-                pass  # Silently ignore
-
-            # Exit transport context - silently ignore errors
-            try:
-                await context.__aexit__(None, None, None)
-            except (RuntimeError, Exception):
-                pass  # Silently ignore
-
-        except Exception:
-            pass  # Silently ignore all cleanup errors
-        finally:
-            # Remove from cache
-            self._run_sessions.pop(cache_key, None)
-            self._run_session_contexts.pop(cache_key, None)
+        # Simply remove the session reference
+        # The underlying connections will be cleaned up by garbage collection
+        del self._run_sessions[cache_key]
 
     async def connect(self, force: bool = False):
         """Initialize a MultiMCPTools instance and connect to the MCP servers"""
