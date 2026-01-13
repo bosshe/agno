@@ -304,10 +304,7 @@ async def test_stale_sessions_cleaned_up_on_new_run():
 
     # Simulate an old session from a previous run
     old_session = MagicMock()
-    old_context = MagicMock()
-    old_session_context = MagicMock()
     tools._run_sessions["old-run-id"] = (old_session, time.time() - 1.0)  # 1 second ago
-    tools._run_session_contexts["old-run-id"] = (old_context, old_session_context)
 
     # Wait for TTL to expire
     time.sleep(0.15)
