@@ -352,8 +352,11 @@ class MultiMCPTools(Toolkit):
         await session.initialize()
 
         # Store the session with timestamp
-        # Note: We don't store context managers to avoid cross-task cleanup issues
-        # The context managers will be cleaned up by garbage collection
+        # Note: We don't store context managers to avoid cross-task cleanup issues.
+        # The context managers will be cleaned up by garbage collection. While this
+        # results in less predictable cleanup timing compared to explicit cleanup,
+        # this trade-off is necessary to avoid RuntimeError when cleanup happens in
+        # a different task than where the context was entered.
         self._run_sessions[cache_key] = (session, time.time())
 
         return session
@@ -365,6 +368,10 @@ class MultiMCPTools(Toolkit):
         This removes the session reference and allows garbage collection to clean up
         the underlying connections. We don't explicitly exit context managers to avoid
         cross-task cleanup issues with async context managers.
+        
+        While garbage collection results in less predictable cleanup timing compared to
+        explicit cleanup, this trade-off is necessary to prevent RuntimeError when
+        cleanup happens in a different task than where the context was entered.
         """
         cache_key = (run_id, server_idx)
         if cache_key not in self._run_sessions:
